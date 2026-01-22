@@ -122,9 +122,9 @@ def format_number(x) -> str:
 def load_default_data() -> pd.DataFrame:
     # IMPORTANT: Streamlit Cloud 배포 시 아래 3개 파일을 repo에 포함시키세요.
     default_files = [
-        ("data/먼지 배출량(2019년 샘플).csv", "먼지"),
-        ("data/질소산화물 배출량(2019년 샘플).csv", "질소산화물"),
-        ("data/황산화물 배출량(2019년 샘플).csv", "황산화물"),
+        ("먼지 배출량(2019년 샘플).csv", "먼지"),
+        ("질소산화물 배출량(2019년 샘플).csv", "질소산화물"),
+        ("황산화물 배출량(2019년 샘플).csv", "황산화물"),
     ]
 
     frames = []
