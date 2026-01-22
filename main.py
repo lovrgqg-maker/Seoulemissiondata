@@ -1,11 +1,10 @@
 import re
-from dataclasses import dataclass
-from typing import Dict, List, Optional, Tuple
+from typing import Optional
 
 import numpy as np
 import pandas as pd
-import plotly.express as px
 import plotly.graph_objects as go
+import plotly.express as px
 import streamlit as st
 
 
@@ -22,47 +21,42 @@ st.title("서울시 TMS 설치 사업장 대기오염물질 일별 배출량 대
 
 
 # -----------------------------
-# Utilities
+# Constants / Utilities
 # -----------------------------
 DEFAULT_ENCODING_CANDIDATES = ["cp949", "euc-kr", "utf-8-sig", "utf-8"]
 
 
 def infer_pollutant_name(filename: str) -> str:
     name = filename or ""
-    # 자주 쓰는 키워드 기반 추정
     if re.search(r"먼지|PM|분진", name, re.IGNORECASE):
         return "먼지"
     if re.search(r"질소산화물|NOx|NOX", name, re.IGNORECASE):
         return "질소산화물"
     if re.search(r"황산화물|SOx|SOX", name, re.IGNORECASE):
         return "황산화물"
-    # 괄호/확장자 제거
+    # fallback: remove extension
     name = re.sub(r"\.[^.]+$", "", name)
     name = re.sub(r"\(.*?\)", "", name).strip()
     return name if name else "업로드 데이터"
 
 
-def read_csv_robust(file) -> pd.DataFrame:
-    # file can be a path(str) or UploadedFile
+def read_csv_robust(file_or_path) -> pd.DataFrame:
     last_err = None
     for enc in DEFAULT_ENCODING_CANDIDATES:
         try:
-            return pd.read_csv(file, encoding=enc)
+            return pd.read_csv(file_or_path, encoding=enc)
         except Exception as e:
             last_err = e
     raise last_err
 
 
 def detect_date_col(df: pd.DataFrame) -> str:
-    # Prefer typical Korean column names
     candidates = [c for c in df.columns if str(c).strip() in ["년월일", "일자", "날짜", "date", "Date"]]
     if candidates:
         return candidates[0]
-    # Fallback: find column containing date-like pattern
     for c in df.columns:
         if "일" in str(c) or "date" in str(c).lower():
             return c
-    # final fallback: first column
     return df.columns[0]
 
 
@@ -70,12 +64,9 @@ def to_long(df: pd.DataFrame, pollutant: str, source: str) -> pd.DataFrame:
     df = df.copy()
     date_col = detect_date_col(df)
 
-    # Parse date
     df[date_col] = pd.to_datetime(df[date_col], errors="coerce")
-    # Drop rows with invalid date
     df = df.dropna(subset=[date_col])
 
-    # Ensure numeric in value columns
     value_cols = [c for c in df.columns if c != date_col]
     for c in value_cols:
         df[c] = pd.to_numeric(df[c], errors="coerce")
@@ -89,7 +80,6 @@ def to_long(df: pd.DataFrame, pollutant: str, source: str) -> pd.DataFrame:
 
     long_df["오염물질"] = pollutant
     long_df["데이터출처"] = source
-
     return long_df
 
 
@@ -115,25 +105,46 @@ def format_number(x) -> str:
     return f"{x:,.2f}"
 
 
+def build_daily_series(df: pd.DataFrame, scope: str, facility: Optional[str]) -> pd.DataFrame:
+    d = df.copy()
+    if scope == "사업장별" and facility:
+        d = d[d["사업장"] == facility]
+
+    daily = (
+        d.groupby("일자", as_index=False)["배출량"]
+        .sum()
+        .sort_values("일자")
+    )
+    return daily
+
+
 # -----------------------------
-# Load default datasets (include these CSVs in your repo)
+# Load default datasets
+# - repo 루트에 CSV가 있어도 읽고
+# - data/ 폴더에 있어도 읽습니다.
 # -----------------------------
 @st.cache_data
 def load_default_data() -> pd.DataFrame:
-    # IMPORTANT: Streamlit Cloud 배포 시 아래 3개 파일을 repo에 포함시키세요.
-    default_files = [
+    # 두 가지 후보 경로를 모두 시도
+    candidates = [
         ("먼지 배출량(2019년 샘플).csv", "먼지"),
         ("질소산화물 배출량(2019년 샘플).csv", "질소산화물"),
         ("황산화물 배출량(2019년 샘플).csv", "황산화물"),
+        ("data/먼지 배출량(2019년 샘플).csv", "먼지"),
+        ("data/질소산화물 배출량(2019년 샘플).csv", "질소산화물"),
+        ("data/황산화물 배출량(2019년 샘플).csv", "황산화물"),
     ]
 
     frames = []
-    for path, pol in default_files:
+    tried = set()
+    for path, pol in candidates:
+        if path in tried:
+            continue
+        tried.add(path)
         try:
             df = read_csv_robust(path)
             frames.append(to_long(df, pol, source="기본탑재"))
         except Exception:
-            # 기본 파일이 repo에 없으면 조용히 스킵 (배포 전에는 반드시 포함 권장)
             continue
 
     if not frames:
@@ -189,7 +200,6 @@ if data_long.empty:
     st.warning("표시할 데이터가 없습니다. 기본탑재 CSV를 repo에 포함하거나 CSV를 업로드하세요.")
     st.stop()
 
-# Basic cleanup
 data_long["배출량"] = pd.to_numeric(data_long["배출량"], errors="coerce")
 
 st.sidebar.header("분석 조건")
@@ -204,6 +214,7 @@ filtered_pol = data_long[data_long["오염물질"] == pollutant_sel].copy()
 # Date range
 min_date = filtered_pol["일자"].min()
 max_date = filtered_pol["일자"].max()
+
 date_range = st.sidebar.date_input(
     "기간",
     value=(min_date.date(), max_date.date()),
@@ -225,37 +236,26 @@ if scope_sel == "사업장별":
 
 # Selected date: default latest date in filtered data
 available_dates = sorted(filtered_pol["일자"].dt.date.unique().tolist())
-default_selected_date = max(available_dates)
+default_selected_date = max(available_dates) if available_dates else max_date.date()
 selected_date = st.sidebar.date_input("비교 기준일(기본=최근)", value=default_selected_date)
 selected_date_ts = pd.to_datetime(selected_date)
-
 
 # -----------------------------
 # Prepare series for chart/metrics
 # -----------------------------
-def build_daily_series(df: pd.DataFrame, scope: str, facility: Optional[str]) -> pd.DataFrame:
-    d = df.copy()
-    if scope == "사업장별" and facility:
-        d = d[d["사업장"] == facility]
-    daily = (
-        d.groupby("일자", as_index=False)["배출량"]
-        .sum()
-        .sort_values("일자")
-    )
-    return daily
-
-
 daily_series = build_daily_series(filtered_pol, scope_sel, facility_sel)
 
 if daily_series.empty:
     st.warning("선택 조건에서 데이터가 없습니다. 기간/사업장 조건을 조정하세요.")
     st.stop()
 
-daily_series["일자"] = pd.to_datetime(daily_series["일자"]).dt.to_pydatetime()
+# Plotly 호환성: 일자 축을 표준 datetime으로 두되, vline은 문자열로 처리(가장 안전)
+daily_series["일자"] = pd.to_datetime(daily_series["일자"])
 
 # Reference values
-latest_date_ts = daily_series["일자"].max()
-# If selected date isn't in series, fallback to latest
+latest_date_ts = pd.to_datetime(daily_series["일자"].max())
+
+# selected_date_ts가 시계열에 없으면 가장 최근 날짜로 보정
 if selected_date_ts not in set(daily_series["일자"]):
     selected_date_ts = latest_date_ts
 
@@ -264,9 +264,7 @@ avg_value = float(daily_series["배출량"].mean())
 diff = selected_value - avg_value
 pct = (diff / avg_value * 100.0) if avg_value != 0 else np.nan
 
-# Simple trend (7-day moving average last value vs overall avg)
 daily_series["MA7"] = daily_series["배출량"].rolling(7, min_periods=1).mean()
-ma7_last = float(daily_series.loc[daily_series["일자"] == selected_date_ts, "MA7"].iloc[0])
 
 
 # -----------------------------
@@ -274,26 +272,21 @@ ma7_last = float(daily_series.loc[daily_series["일자"] == selected_date_ts, "M
 # -----------------------------
 tab1, tab2 = st.tabs(["대시보드", "데이터 품질"])
 
-
 with tab1:
-    # Header context
     left, right = st.columns([2, 1])
     with left:
         scope_label = "전체 합계" if scope_sel == "전체 합계" else f"사업장: {facility_sel}"
         st.subheader(f"{pollutant_sel} · {scope_label}")
-
     with right:
         st.caption("비교 기준일")
-        st.markdown(f"**{selected_date_ts.date()}**")
+        st.markdown(f"**{pd.to_datetime(selected_date_ts).date()}**")
 
-    # Metrics
     m1, m2, m3, m4 = st.columns(4)
     m1.metric("기준일 배출량", format_number(selected_value))
     m2.metric("기간 평균", format_number(avg_value))
     m3.metric("차이(기준일-평균)", format_number(diff))
     m4.metric("증감률", "-" if np.isnan(pct) else f"{pct:,.2f}%")
 
-    # Interpretation
     interp = "평균 수준"
     if not np.isnan(pct):
         if pct >= 10:
@@ -302,9 +295,13 @@ with tab1:
             interp = "평균 대비 낮은 수준(하향)"
         else:
             interp = "평균과 유사한 수준"
-    st.info(f"해석(간단): 선택일({selected_date_ts.date()})은 **{interp}**입니다. (기준: 평균 대비 ±10%)")
+    st.info(
+        f"해석(간단): 선택일({pd.to_datetime(selected_date_ts).date()})은 **{interp}**입니다. (기준: 평균 대비 ±10%)"
+    )
 
+    # -----------------------------
     # Plotly chart
+    # -----------------------------
     fig = go.Figure()
 
     fig.add_trace(
@@ -324,22 +321,36 @@ with tab1:
         )
     )
 
-    # 평균선
-    fig.add_hline(
+    # 평균선: annotation은 add_hline에 넣지 않고 분리(환경에 따라 더 안정적)
+    fig.add_hline(y=avg_value, line_dash="dash")
+
+    # 평균 라벨(우측 상단 근처에 표시)
+    fig.add_annotation(
+        x=daily_series["일자"].max(),
         y=avg_value,
-        line_dash="dash",
-        annotation_text="기간 평균",
-        annotation_position="top left",
+        xref="x",
+        yref="y",
+        text="기간 평균",
+        showarrow=False,
+        xanchor="right",
+        yanchor="bottom",
     )
 
-    # 선택일 표시
-    selected_date_for_plot = pd.to_datetime(selected_date_ts).to_pydatetime()
-    
+    # 선택일 표시 (중요: add_vline에 annotation 옵션을 넣지 말 것)
+    selected_date_for_plot = pd.to_datetime(selected_date_ts).strftime("%Y-%m-%d")
     fig.add_vline(
         x=selected_date_for_plot,
         line_dash="dot",
-        annotation_text=f"선택일 {pd.to_datetime(selected_date_ts).date()}",
-        annotation_position="top right",
+    )
+    fig.add_annotation(
+        x=selected_date_for_plot,
+        y=1.02,
+        xref="x",
+        yref="paper",
+        text=f"선택일 {selected_date_for_plot}",
+        showarrow=False,
+        xanchor="right",
+        yanchor="bottom",
     )
 
     fig.update_layout(
@@ -353,11 +364,15 @@ with tab1:
 
     st.plotly_chart(fig, use_container_width=True)
 
-    # Optional: Top facilities on selected date (only meaningful when scope is total)
+    # 선택일 사업장별 상위 10 (전체 합계일 때)
     if scope_sel == "전체 합계":
         st.subheader("선택일 사업장별 기여도(상위 10)")
-        day_detail = filtered_pol[filtered_pol["일자"] == selected_date_ts].copy()
-        day_detail = day_detail.groupby("사업장", as_index=False)["배출량"].sum().sort_values("배출량", ascending=False)
+        day_detail = filtered_pol[filtered_pol["일자"] == pd.to_datetime(selected_date_ts)].copy()
+        day_detail = (
+            day_detail.groupby("사업장", as_index=False)["배출량"]
+            .sum()
+            .sort_values("배출량", ascending=False)
+        )
         top10 = day_detail.head(10)
 
         if not top10.empty:
@@ -367,22 +382,20 @@ with tab1:
         else:
             st.write("선택일에 사업장별 데이터가 없습니다.")
 
-
 with tab2:
     st.subheader("결측치 및 이상치 점검(간단)")
 
-    # Pivot back to wide for easier column checks
-    date_col = "일자"
-    wide = filtered_pol.pivot_table(index=date_col, columns="사업장", values="배출량", aggfunc="sum").sort_index()
+    wide = (
+        filtered_pol.pivot_table(index="일자", columns="사업장", values="배출량", aggfunc="sum")
+        .sort_index()
+    )
 
-    # Missing summary
     missing_counts = wide.isna().sum().sort_values(ascending=False)
     missing_df = missing_counts.reset_index()
     missing_df.columns = ["사업장", "결측치 개수"]
     st.caption("사업장별 결측치 개수(기간 내)")
     st.dataframe(missing_df, use_container_width=True, height=300)
 
-    # Outlier summary (IQR rule)
     outlier_counts = pd.Series({col: iqr_outlier_count(wide[col]) for col in wide.columns}).sort_values(ascending=False)
     outlier_df = outlier_counts.reset_index()
     outlier_df.columns = ["사업장", "이상치(IQR) 개수"]
