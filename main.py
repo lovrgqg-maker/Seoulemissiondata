@@ -251,6 +251,8 @@ if daily_series.empty:
     st.warning("선택 조건에서 데이터가 없습니다. 기간/사업장 조건을 조정하세요.")
     st.stop()
 
+daily_series["일자"] = pd.to_datetime(daily_series["일자"]).dt.to_pydatetime()
+
 # Reference values
 latest_date_ts = daily_series["일자"].max()
 # If selected date isn't in series, fallback to latest
@@ -331,10 +333,12 @@ with tab1:
     )
 
     # 선택일 표시
+    selected_date_for_plot = pd.to_datetime(selected_date_ts).to_pydatetime()
+    
     fig.add_vline(
-        x=selected_date_ts,
+        x=selected_date_for_plot,
         line_dash="dot",
-        annotation_text=f"선택일 {selected_date_ts.date()}",
+        annotation_text=f"선택일 {pd.to_datetime(selected_date_ts).date()}",
         annotation_position="top right",
     )
 
